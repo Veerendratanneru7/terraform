@@ -1,0 +1,2038 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Smartvault MFA (aPersona) resources with separate AMIs for ASM Portal,ASM Webapps and ASM Callback
+
+Parameters:
+  Owner:
+    Description: The key contact / stack holder of this stack
+    Type: String
+    Default: devops@smartvault.com
+  EnvId:
+    Description: The environment ID for this stack
+    Type: String
+    AllowedPattern: "[A-Za-z0-9]+"
+    MaxLength: 15  
+  PortalImageId:
+    Description: The AMI for the ASM Portal
+    Type: AWS::EC2::Image::Id
+    Default: ami-03d900e98e70accc9
+  WebappsImageId:
+    Description: The AMI for ASM Webapps
+    Type: AWS::EC2::Image::Id
+    Default: ami-0bbc596e2ce654da8  
+  CallbackImageId:
+    Description: The AMI for ASM Callback
+    Type: AWS::EC2::Image::Id
+    Default: ami-02aea9aab788c2631 
+  SslPolicy:
+    Description: The SSL policy for the HTTPS listener
+    Type: String
+    Default: ELBSecurityPolicy-TLS-1-2-2017-01      
+  UpgradeDB:
+    Description: Is the SQL upgrade required?
+    Type: String
+    AllowedValues:
+      - "True"
+      - "False"
+  MySQLEngineVersion:
+    Description: MySQL Engine version
+    Type: String
+    Default: 5.7.44-RDS.20240808
+  RdsStorageType:
+    Description: Type of RDS storage class
+    Type: String
+    Default: gp3
+  ASGmin:
+    Description: AutoScaling Group Minimum Instances
+    Type: Number
+    Default: 1
+  ASGdesired:
+    Description: AutoScaling Group Desired Instances
+    Type: Number
+    Default: 1
+  ASGmax:
+    Description: AutoScaling Group Maximum Instances
+    Type: Number
+    Default: 1
+  WebAppsASGmax:
+    Description: AutoScaling Group for WebApps Maximum Instances
+    Type: Number
+    Default: 5   
+  MFAVersion:
+    Description: The ASM installation version
+    Type: String
+    Default: 3.3.0
+  SecretKeyTwilio:
+    Description: Twilio callback secret key
+    Type: String
+    NoEcho: true
+    Default: YourSecretKeyHere
+  DBUser:
+    Description: The username of the RDS MySQL instance
+    Type: String
+    Default: root
+  DBPassword:
+    Description: The password of the RDS MySQL instance
+    Type: String
+    NoEcho: true
+    Default: password
+  WeeklyScheduleUp:
+    Description: Time at which the instance will be started on week days. (Cron Expression)
+    Type: String
+    Default: 15 13 * * 1-5
+  WeekendScheduleDown:
+    Description: Time at which the instance will be stopped on weekend. (Cron Expression)
+    Type: String
+    Default: 15 3 * * 6
+  CostSaving:
+    Description: "True: For staging environment. False: For production environment."
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  ActionsEnabled:
+    Description: Alarm actions enabled/disabled (Aimed at SNS actions).
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  RestrictedUsers:
+    Type: List<String>
+    Description: List of IAM users who should not access production resources
+       
+Mappings:
+  "764285433653":
+    all-regions:
+      InstanceMonitoring: "true"
+      Domain: "dev.smartvault.com"
+      AlbDeregistrationDelay: "0"
+      EnableHostnamePrefix: "false"
+      CertificateArn: "arn:aws:acm:us-east-2:764285433653:certificate/d45c14a1-f9bf-4243-839c-8c7ee0a018de"
+    InstanceTypes:
+      CallbackInstanceType: "t3.medium"
+      WebAppsInstanceType: "t3.medium"
+      PortalInstanceType: "t3.medium"
+    us-east-2:
+      keypair: "smartvault-development-us-east-2"
+  
+  "450560603497":
+    all-regions:
+      InstanceMonitoring: "true"
+      Domain: "stg.smartvault.com"
+      AlbDeregistrationDelay: "0"
+      EnableHostnamePrefix: "false"
+      CertificateArn: "arn:aws:acm:us-east-2:450560603497:certificate/277c9eb7-b53c-4284-9f75-8f57976f464f"
+    InstanceTypes:
+      CallbackInstanceType: "t3.medium"
+      WebAppsInstanceType: "t3.medium"
+      PortalInstanceType: "t3.medium"
+    us-east-2:
+      keypair: "smartvault-staging-us-east-2"
+  
+  "587105464662":
+    all-regions:
+      InstanceMonitoring: "true"
+      Domain: "smartvault.com"
+      AlbDeregistrationDelay: "300"
+      EnableHostnamePrefix: "false"
+      CertificateArn: "arn:aws:acm:us-east-2:587105464662:certificate/281fb180-96f2-4cdb-9cf7-cab1741634ad"
+    InstanceTypes:
+      CallbackInstanceType: "t3.medium"
+      WebAppsInstanceType: "t3.large"
+      PortalInstanceType: "t3.large"
+    us-east-2:
+      keypair: "smartvault-production-us-east-2"
+
+
+Conditions:
+  EnableHostnamePrefix: !Equals
+    - !FindInMap
+      - !Ref AWS::AccountId
+      - all-regions
+      - EnableHostnamePrefix
+    - true
+  ScheduleEnabled: !Equals
+    - !Ref CostSaving
+    - true
+  IsAccountProd: !Equals
+    - !Ref AWS::AccountId
+    - "587105464662"
+  UpgradeDBCondition: !Equals
+    - !Ref UpgradeDB
+    - "True"
+Resources: 
+  PortalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /smartvault/mfa/portal
+      RetentionInDays: 365
+      DataProtectionPolicy:
+        Name: portal-data-protection-policy
+        Description: log group custom data protection policy for masking OTP in portal logs
+        Version: "2021-06-01"
+        Statement:
+          - Sid: audit-policy
+            DataIdentifier:
+              - Otp
+              - otp
+              - OTP_SENT
+              - o
+              - verificationCode
+              - About-to-send-OTP
+              - catalina_otp
+              - entered-OTP
+              - passcodeSmartvault
+              - messagePasscode
+            Operation:
+              Audit:
+                FindingsDestination: {}
+          - Sid: redact-policy
+            DataIdentifier:
+              - Otp
+              - otp
+              - OTP_SENT
+              - o
+              - verificationCode
+              - About-to-send-OTP
+              - catalina_otp
+              - entered-OTP
+              - passcodeSmartvault
+              - messagePasscode
+            Operation:
+              Deidentify:
+                MaskConfig: {}
+        Configuration:
+          CustomDataIdentifier:
+            - Name: Otp
+              Regex: Otp:[0-9]{6}
+            - Name: otp
+              Regex: otp=[0-9]{6}
+            - Name: OTP_SENT
+              Regex: OTP_SENT=[0-9]{6}
+            - Name: o
+              Regex: o=[0-9]{6}
+            - Name: verificationCode
+              Regex: verificationCode=[0-9]{6}
+            - Name: About-to-send-OTP
+              Regex: About to send OTP:[0-9]{6}
+            - Name: catalina_otp
+              Regex: "&nbsp;[0-9]{6}&"
+            - Name: entered-OTP
+              Regex: entered OTP:[0-9]{6}
+            - Name: passcodeSmartvault
+              Regex: "Your one time passcode for Smartvault is, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, Again, the passcode is [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}"
+            - Name: messagePasscode
+              Regex: message:[0-9]{6}
+
+  WebappsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /smartvault/mfa/webapps
+      RetentionInDays: 365
+      DataProtectionPolicy:
+        Name: webapps-data-protection-policy
+        Description: log group custom data protection policy for masking OTP in webapps logs
+        Version: "2021-06-01"
+        Statement:
+          - Sid: audit-policy
+            DataIdentifier:
+              - Otp
+              - otp
+              - OTP_SENT
+              - o
+              - verificationCode
+              - About-to-send-OTP
+              - catalina_otp
+              - entered-OTP
+              - passcodeSmartvault
+              - messagePasscode
+            Operation:
+              Audit:
+                FindingsDestination: {}
+          - Sid: redact-policy
+            DataIdentifier:
+              - Otp
+              - otp
+              - OTP_SENT
+              - o
+              - verificationCode
+              - About-to-send-OTP
+              - catalina_otp
+              - entered-OTP
+              - passcodeSmartvault
+              - messagePasscode
+            Operation:
+              Deidentify:
+                MaskConfig: {}
+        Configuration:
+          CustomDataIdentifier:
+            - Name: Otp
+              Regex: Otp:[0-9]{6}
+            - Name: otp
+              Regex: otp=[0-9]{6}
+            - Name: OTP_SENT
+              Regex: OTP_SENT=[0-9]{6}
+            - Name: o
+              Regex: o=[0-9]{6}
+            - Name: verificationCode
+              Regex: verificationCode=[0-9]{6}
+            - Name: About-to-send-OTP
+              Regex: About to send OTP:[0-9]{6}
+            - Name: catalina_otp
+              Regex: "&nbsp;[0-9]{6}&"
+            - Name: entered-OTP
+              Regex: entered OTP:[0-9]{6}
+            - Name: passcodeSmartvault
+              Regex: "Your one time passcode for Smartvault is, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, Again, the passcode is [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}"
+            - Name: messagePasscode
+              Regex: message:[0-9]{6}
+
+  CallbackLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /smartvault/mfa/callback
+      RetentionInDays: 365
+      DataProtectionPolicy:
+        Name: callback-data-protection-policy
+        Description: log group custom data protection policy for masking OTP in callback logs
+        Version: "2021-06-01"
+        Statement:
+          - Sid: audit-policy
+            DataIdentifier:
+              - Otp
+              - otp
+              - OTP_SENT
+              - o
+              - verificationCode
+              - About-to-send-OTP
+              - catalina_otp
+              - entered-OTP
+              - passcodeSmartvault
+              - messagePasscode
+            Operation:
+              Audit:
+                FindingsDestination: {}
+          - Sid: redact-policy
+            DataIdentifier:
+              - Otp
+              - otp
+              - OTP_SENT
+              - o
+              - verificationCode
+              - About-to-send-OTP
+              - catalina_otp
+              - entered-OTP
+              - passcodeSmartvault
+              - messagePasscode
+            Operation:
+              Deidentify:
+                MaskConfig: {}
+        Configuration:
+          CustomDataIdentifier:
+            - Name: Otp
+              Regex: Otp:[0-9]{6}
+            - Name: otp
+              Regex: otp=[0-9]{6}
+            - Name: OTP_SENT
+              Regex: OTP_SENT=[0-9]{6}
+            - Name: o
+              Regex: o=[0-9]{6}
+            - Name: verificationCode
+              Regex: verificationCode=[0-9]{6}
+            - Name: About-to-send-OTP
+              Regex: About to send OTP:[0-9]{6}
+            - Name: catalina_otp
+              Regex: "&nbsp;[0-9]{6}&"
+            - Name: entered-OTP
+              Regex: entered OTP:[0-9]{6}
+            - Name: passcodeSmartvault
+              Regex: "Your one time passcode for Smartvault is, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, Again, the passcode is [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}, [0-9]{1}"
+            - Name: messagePasscode
+              Regex: message:[0-9]{6}
+
+  AttachPolicyToIAMUserGroup:
+    Type: AWS::IAM::Policy
+    Condition: IsAccountProd
+    Properties:
+      PolicyName: MFACloudWatchLoggroupAccess
+      PolicyDocument:  
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Deny
+            Action: logs:*             
+            Resource:             
+              - !Sub arn:aws:logs:us-east-2:${AWS::AccountId}:log-group:/smartvault/mfa/portal:*
+              - !Sub arn:aws:logs:us-east-2:${AWS::AccountId}:log-group:/smartvault/mfa/webapps:*
+              - !Sub arn:aws:logs:us-east-2:${AWS::AccountId}:log-group:/smartvault/mfa/callback:*
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/smartvault-${EnvId}-iam-role-mfa
+                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/smartvault-${EnvId}-iam-instanceprofile-mfa                
+                  - !If 
+                    - IsAccountProd
+                    - !Ref AWS::NoValue 
+                    - !Split 
+                        - ","
+                        - !Join
+                            - ","
+                            - !Select
+                                - 1
+                                - !Ref RestrictedUsers  
+                
+                  - !Sub arn:aws:iam::${AWS::AccountId}:user/abhishek.pathak
+                  - !Sub arn:aws:iam::${AWS::AccountId}:user/corey.pon
+                  - !Sub arn:aws:iam::${AWS::AccountId}:user/manik.rajendra                                  
+      Groups:
+        - smartvault-iam-group-devops
+                      
+  SmartVaultWebappsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for ASMWebapps with specific inbound and outbound rules"
+      VpcId:
+        Fn::ImportValue: 
+          !Sub "smartvault-${AWS::Region}-vpc"         
+      GroupName: !Sub smartvault-${EnvId}-secgrp-ASMWebapps-mfa
+      SecurityGroupIngress:
+      
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: 
+            Fn::ImportValue: !Sub smartvault-${EnvId}-secgrp-ec2-webserver
+          Description: "Webserver-MFA access"
+      
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "Allow all outbound traffic"
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-secgrp-ASMWebapps-mfa
+      
+  SmartVaultWebappsSecurityGroupEC2:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: SmartVaultWebappsSecurityGroup
+    Properties:
+      GroupDescription: "Security group for ASMWebapps EC2 instance allowing SSH and Webapps Load Balancer access"
+      VpcId:
+        Fn::ImportValue:
+          !Sub "smartvault-${AWS::Region}-vpc"
+      GroupName: !Sub smartvault-${EnvId}-secgrp-ASMWebapps-mfa-ec2
+      SecurityGroupIngress:
+      
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !ImportValue smartvault-secgrp-remoteadmin
+          Description: "Remote Admin - SSH access"
+
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref SmartVaultWebappsSecurityGroup
+          Description: "MFA access"
+
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "Allow all outbound traffic"
+
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-secgrp-ASMWebapps-mfa-ec2
+          
+  SmartVaultCallbackSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for ASMCallback Load Balancer allowing inbound HTTP/HTTPS traffic"
+      VpcId:
+        Fn::ImportValue:
+          !Sub "smartvault-${AWS::Region}-vpc"
+      GroupName: !Sub smartvault-${EnvId}-secgrp-ASMCallback-mfa
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "Allow inbound HTTP traffic"
+
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: "Allow inbound HTTPS traffic"          
+        
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "Allow all outbound traffic"
+
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-secgrp-ASMCallback-mfa
+          
+  SmartVaultCallbackSecurityGroupEC2:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: SmartVaultCallbackSecurityGroup
+    Properties:
+      GroupDescription: "Security group for ASMCallback EC2 instance allowing SSH and Web Access"
+      VpcId:
+        Fn::ImportValue:
+          !Sub "smartvault-${AWS::Region}-vpc"
+      GroupName: !Sub smartvault-${EnvId}-secgrp-ASMCallback-mfa-ec2
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !ImportValue smartvault-secgrp-remoteadmin
+          Description: "Remote Admin - SSH access"
+        
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref SmartVaultCallbackSecurityGroup
+          Description: "Allow HTTP traffic"
+
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "Allow all outbound traffic"   
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-secgrp-ASMCallback-mfa-ec2
+
+  SmartVaultPortalSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for ASMPortal Load Balancer allowing inbound HTTP/HTTPS traffic for Portal access"
+      VpcId:
+        Fn::ImportValue:
+          !Sub "smartvault-${AWS::Region}-vpc"
+      GroupName: !Sub smartvault-${EnvId}-secgrp-ASMPortal-mfa
+      SecurityGroupIngress: 
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !ImportValue smartvault-secgrp-remoteadmin
+          Description: "Allow HTTP traffic"
+        
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !ImportValue smartvault-secgrp-remoteadmin
+          Description: "Allow HTTPS traffic"  
+          
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "Allow all outbound traffic"
+
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-secgrp-ASMPortal-mfa
+    
+  SmartVaultPortalSecurityGroupEC2:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: SmartVaultPortalSecurityGroup
+    Properties:
+      GroupDescription: "Security group for ASMPortal EC2 instance allowing SSH and OpenVPN access"
+      VpcId:
+        Fn::ImportValue:
+          !Sub "smartvault-${AWS::Region}-vpc"
+      GroupName: !Sub smartvault-${EnvId}-secgrp-ASMPortal-mfa-ec2
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !ImportValue smartvault-secgrp-remoteadmin
+          Description: "Remote Admin - SSH access"
+
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref  SmartVaultPortalSecurityGroup
+          Description: "Remote Admin - OpenVPN access"
+
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: "Allow all outbound traffic"
+
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-secgrp-ASMPortal-mfa-ec2
+          
+  launchTemplateASMWebApps:
+    Type: AWS::EC2::LaunchTemplate         
+    DependsOn:
+      - mfaRDSInstance
+    Metadata:
+      Comment: Bootstrap
+      AWS::CloudFormation::Init:
+        configSets:
+          bootstrap:
+            - install_cfn
+            - upgrade-db-script
+            - JVM-Heapsize
+            - configure_mfa              
+            - start_services
+            - finalise
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.launchTemplateASMWebApps.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource launchTemplateASMWebApps --configsets bootstrap --region ${AWS::Region}
+                runas=root
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        upgrade-db-script:
+          commands:
+            upgrade:
+              command: !Sub |
+                LOG_FILE="/var/log/db-script.log"
+                PARAMETER_NAME="/${EnvId}/apersona/dbupgrade"
+
+                if [ "${UpgradeDB}" == "True" ]; then                  
+                  UPGRADE_STATUS=$(aws ssm get-parameter --name "$PARAMETER_NAME" --query "Parameter.Value" --output text 2>/dev/null || echo "Not Found")
+                  if [ "$UPGRADE_STATUS" == "True" ]; then
+                    echo "Error: Database upgrade has already been performed" >> "$LOG_FILE" 2>&1 
+                    sudo systemctl restart tomcat
+                  else                   
+                    echo "Upgrading the database..." >> "$LOG_FILE" 2>&1
+                    mysql -u root -p"${DBPassword}" -h "${route53RDSMFA}" --force < "/home/ec2-user/aPersona_ASM_v${MFAVersion}_Product/asm_v${MFAVersion}_upgrade.sql"                    
+                    aws ssm put-parameter --name "$PARAMETER_NAME" --value "True" --type String --overwrite 
+                    echo "Database upgrade is complete" >> "$LOG_FILE" 2>&1    
+                    sudo systemctl restart tomcat
+                  fi
+                else
+                  echo "Skipping DB upgrade" >> "$LOG_FILE" 2>&1                  
+                fi
+              env:
+                UpgradeDB: !Ref UpgradeDB                
+
+        JVM-Heapsize:
+          commands:
+            jvm-set:
+              command: !Sub |
+                path="/var/lib/tomcat/bin/setenv.sh"
+
+                if [[ "${EnvId}" == "dev" || "${EnvId}" == "stg" ]]; then
+                  echo 'CATALINA_OPTS="-Xms512M -Xmx2048M"' > $path
+                  echo 'JAVA_OPTS="$JAVA_OPTS -Xlog:gc*:file=/var/lib/tomcat/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=50m"' >> $path
+                 else
+                  echo 'CATALINA_OPTS="-Xms512M -Xmx2048M"' > $path
+                  echo 'JAVA_OPTS="$JAVA_OPTS -Xlog:gc*:file=/var/lib/tomcat/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=50m"' >> $path
+                fi
+                chmod +x $path
+                sudo cd /var/lib/tomcat/bin/ && setenv.sh
+                sudo systemctl restart tomcat
+        configure_mfa:
+          files:
+            /var/lib/tomcat/webapps/asm/WEB-INF/classes/apersona-db.properties:
+              content: !Sub |
+                # DB properties for apersona database
+                #MySql
+                db.driverClassName=com.mysql.jdbc.Driver
+                db.url=jdbc:mysql://${route53RDSMFA}:3306/apersona
+                db.username=root
+                db.password=${DBPassword}
+                db.jpa.database=MYSQL
+                #########################################################################################################
+                # Please don't forget to run the asmdb-v${MFAVersion}-Install.sql script on the RDS/db instance and update db.url
+              mode: "000644"
+              owner: tomcat
+              group: tomcat            
+            /var/lib/tomcat/webapps/asm/WEB-INF/classes/apersona-twilio.properties:
+              content: !Sub
+                - |
+                  #############################################
+                  # Set ASM server instance for Twilio voice callback
+                  ##############################################
+                  TWILIO_CALLBACK_SERVICE=https://${prefix}asm-callback.${domain}/asm_callback/twilio.ap
+                  TWILIO_CALLBACK_SECRET_KEY=${secretkey}
+                - domain: !FindInMap
+                    - !Ref AWS::AccountId
+                    - all-regions
+                    - Domain
+                  prefix: !If
+                    - EnableHostnamePrefix
+                    - !Ref EnvId
+                    - ""
+                  secretkey: !Ref SecretKeyTwilio
+              mode: "000644"
+              owner: tomcat
+              group: tomcat           
+                      
+          commands:
+            01-change-file-permissions:
+              command: chmod 755 -R /var/lib/tomcat/webapps/asm
+            02-change-file-ownership:
+              command: chown -R tomcat:tomcat
+                /var/lib/tomcat/webapps/asm
+            03-remove-index.jsp:
+              command: rm -f /var/lib/tomcat/webapps/ROOT/index.jsp && rm -rf
+                /var/lib/tomcat/webapps/examples
+            04-update-phone-config.properties:
+              command: sed -i 's/true/false/g'
+                /var/lib/tomcat/webapps/asm/WEB-INF/classes/phone-coding.properties         
+                
+        start_services:
+          commands:
+            00-daemon-reload:
+              command: sudo systemctl daemon-reload
+            01-start-tomcat-systemboot:
+              command: sudo systemctl enable tomcat.service
+            02-start-tomcat:
+              command: sudo systemctl start tomcat.service
+        finalise:
+          commands:
+            1-signal-success:
+              command: !Sub |
+                /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource autoscalinggroupASMWebApps --region ${AWS::Region}
+    Properties:
+      LaunchTemplateName: !Sub smartvault-${EnvId}-ec2-launchtemplate-ASMWebApps
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Sub smartvault-${EnvId}-iam-instanceprofile-mfa
+        ImageId: !Ref WebappsImageId
+        Monitoring:
+          Enabled: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - InstanceMonitoring
+        InstanceType: !FindInMap        
+          - !Ref AWS::AccountId
+          - InstanceTypes
+          - WebAppsInstanceType
+        KeyName: !FindInMap
+          - !Ref AWS::AccountId
+          - !Ref AWS::Region
+          - keypair
+        SecurityGroupIds:
+          - !Ref SmartVaultWebappsSecurityGroupEC2
+        UserData: !Base64
+          Fn::Join:
+            - ""
+            - - |
+                #!/bin/bash -xe
+              - |
+                yum update -y aws-cfn-bootstrap
+              - "/opt/aws/bin/cfn-init -v "
+              - "         --stack "
+              - !Ref AWS::StackName
+              - "         --resource launchTemplateASMWebApps "
+              - "         --configsets bootstrap "
+              - "         --region "
+              - !Ref AWS::Region
+              - ""
+  
+  autoscalinggroupASMWebApps:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      Cooldown: 300
+      DesiredCapacity: !Ref ASGdesired
+      HealthCheckGracePeriod: 300
+      HealthCheckType: EC2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref launchTemplateASMWebApps
+        Version: !GetAtt launchTemplateASMWebApps.LatestVersionNumber
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupInServiceInstances  
+      MaxSize: !Ref WebAppsASGmax
+      MinSize: !Ref ASGmin
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp2
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-ec2-asg-ASMWebApps
+          PropagateAtLaunch: "true"
+        - Key: Owner
+          Value: !Ref Owner
+          PropagateAtLaunch: "true"
+        - Key: UpgradeDB
+          Value: !Ref UpgradeDB
+          PropagateAtLaunch: "true"      
+      TargetGroupARNs:             
+        - !Ref internalTargetGroupWebApps         
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: "true"
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref ASGdesired
+        Timeout: PT15M
+  MemoryTargetTrackingScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    DependsOn: autoscalinggroupASMWebApps
+    Properties:
+      PolicyName: Memorytarget-tracking-scaling-policy
+      PolicyType: TargetTrackingScaling
+      AutoScalingGroupName: !Ref autoscalinggroupASMWebApps
+      TargetTrackingConfiguration:
+        TargetValue: 80.0
+        CustomizedMetricSpecification:
+          MetricName: MemoryUtilization
+          Namespace: System/Linux
+          Dimensions:
+            - Name: AutoScalingGroupName
+              Value: !Ref autoscalinggroupASMWebApps
+          Statistic: Average
+          Unit: Percent             
+  mfaWeeklyScheduledActionUpWebapps:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: ScheduleEnabled
+    Properties:
+      AutoScalingGroupName: !Ref autoscalinggroupASMWebApps
+      DesiredCapacity: 2
+      MaxSize: !Ref WebAppsASGmax
+      MinSize: !Ref ASGmin
+      Recurrence: !Ref WeeklyScheduleUp
+  mfaWeekendScheduledActionDownWebapps:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: ScheduleEnabled
+    Properties:
+      AutoScalingGroupName: !Ref autoscalinggroupASMWebApps
+      DesiredCapacity: 0
+      MaxSize: 2
+      MinSize: 0
+      Recurrence: !Ref WeekendScheduleDown
+
+  launchTemplateASMCallback:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn:
+      - mfaRDSInstance
+    Metadata:
+      Comment: Bootstrap
+      AWS::CloudFormation::Init:
+        configSets:
+          bootstrap:
+            - install_cfn
+            - JVM-Heapsize
+            - configure_mfa                       
+            - start_services
+            - finalise
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.launchTemplateASMCallback.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource launchTemplateASMCallback --configsets bootstrap --region ${AWS::Region}
+                runas=root
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf                       
+
+        JVM-Heapsize:
+          commands:
+            jvm-set:
+              command: !Sub |
+                path="/var/lib/tomcat/bin/setenv.sh"
+
+                if [[ "${EnvId}" == "dev" || "${EnvId}" == "stg" ]]; then
+                  echo 'CATALINA_OPTS="-Xms512M -Xmx2048M"' > $path
+                  echo 'JAVA_OPTS="$JAVA_OPTS -Xlog:gc*:file=/var/lib/tomcat/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=50m"' >> $path
+                 else
+                  echo 'CATALINA_OPTS="-Xms512M -Xmx2048M"' > $path
+                  echo 'JAVA_OPTS="$JAVA_OPTS -Xlog:gc*:file=/var/lib/tomcat/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=50m"' >> $path
+                fi
+                chmod +x $path
+                sudo cd /var/lib/tomcat/bin/ && setenv.sh
+                sudo systemctl restart tomcat
+        configure_mfa:
+          files:                               
+            /var/lib/tomcat/webapps/asm_callback/WEB-INF/classes/asm-callback.properties:
+              content: !Sub |
+                #############################################
+                # Set Twilio voice callback properties
+                ##############################################
+                TWILIO_CALLBACK_SECRET_KEY=${SecretKeyTwilio}
+              mode: "000644"
+              owner: tomcat
+              group: tomcat           
+          commands:
+            01-change-file-permissions:
+              command: chmod 755 -R /var/lib/tomcat/webapps/asm_callback
+            02-change-file-ownership:
+              command: chown -R tomcat:tomcat
+                /var/lib/tomcat/webapps/asm_callback
+            03-remove-index.jsp:
+              command: rm -f /var/lib/tomcat/webapps/ROOT/index.jsp && rm -rf
+                /var/lib/tomcat/webapps/examples                  
+        start_services:
+          commands:
+            00-daemon-reload:
+              command: sudo systemctl daemon-reload
+            01-start-tomcat-systemboot:
+              command: sudo systemctl enable tomcat.service
+            02-start-tomcat:
+              command: sudo systemctl start tomcat.service
+        finalise:
+          commands:
+            1-signal-success:
+              command: !Sub |
+                /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource autoscalinggroupASMCallback --region ${AWS::Region}
+
+    Properties:
+      LaunchTemplateName: !Sub smartvault-${EnvId}-ec2-launchtemplate-ASMCallback
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Sub smartvault-${EnvId}-iam-instanceprofile-mfa
+        ImageId: !Ref CallbackImageId
+        Monitoring:
+          Enabled: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - InstanceMonitoring
+        InstanceType: !FindInMap
+          - !Ref AWS::AccountId
+          - InstanceTypes
+          - CallbackInstanceType  
+        KeyName: !FindInMap
+          - !Ref AWS::AccountId
+          - !Ref AWS::Region
+          - keypair
+        SecurityGroupIds:
+          - !Ref SmartVaultCallbackSecurityGroupEC2
+        UserData: !Base64
+          Fn::Join:
+            - ""
+            - - |
+                #!/bin/bash -xe
+              - |
+                yum update -y aws-cfn-bootstrap
+              - "/opt/aws/bin/cfn-init -v "
+              - "         --stack "
+              - !Ref AWS::StackName
+              - "         --resource launchTemplateASMCallback "
+              - "         --configsets bootstrap "
+              - "         --region "
+              - !Ref AWS::Region
+              - ""
+
+  autoscalinggroupASMCallback:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      Cooldown: 300
+      DesiredCapacity: !Ref ASGdesired
+      HealthCheckGracePeriod: 300
+      HealthCheckType: EC2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref launchTemplateASMCallback
+        Version: !GetAtt launchTemplateASMCallback.LatestVersionNumber
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupInServiceInstances
+      MaxSize: !Ref ASGmax
+      MinSize: !Ref ASGmin
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp2
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-ec2-asg-ASMCallback
+          PropagateAtLaunch: "true"
+        - Key: Owner
+          Value: !Ref Owner
+          PropagateAtLaunch: "true"                
+      TargetGroupARNs:                    
+        - !Ref publicTargetGroupCallback
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: "true"
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref ASGdesired
+        Timeout: PT15M
+  mfaWeeklyScheduledActionUpCallback:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: ScheduleEnabled
+    Properties:
+      AutoScalingGroupName: !Ref autoscalinggroupASMCallback
+      DesiredCapacity: !Ref ASGdesired
+      MaxSize: !Ref ASGmax
+      MinSize: !Ref ASGmin
+      Recurrence: !Ref WeeklyScheduleUp
+  mfaWeekendScheduledActionDownCallback:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: ScheduleEnabled
+    Properties:
+      AutoScalingGroupName: !Ref autoscalinggroupASMCallback
+      DesiredCapacity: 0
+      MaxSize: 2
+      MinSize: 0
+      Recurrence: !Ref WeekendScheduleDown
+
+  launchTemplateASMPortal:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn:
+      - mfaRDSInstance
+    Metadata:
+      Comment: Bootstrap
+      AWS::CloudFormation::Init:
+        configSets:
+          bootstrap:
+            - install_cfn            
+            - JVM-Heapsize
+            - configure_mfa            
+            - configure_cloudwatch
+            - start_services
+            - finalise
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.launchTemplateASMPortal.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource launchTemplateASMPortal --configsets bootstrap --region ${AWS::Region}
+                runas=root
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf        
+        JVM-Heapsize:
+          commands:
+            jvm-set:
+              command: !Sub |
+                path="/var/lib/tomcat/bin/setenv.sh"
+
+                if [[ "${EnvId}" == "dev" || "${EnvId}" == "stg" ]]; then
+                  echo 'CATALINA_OPTS="-Xms512M -Xmx2048M"' > $path
+                  echo 'JAVA_OPTS="$JAVA_OPTS -Xlog:gc*:file=/var/lib/tomcat/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=50m"' >> $path
+                 else
+                  echo 'CATALINA_OPTS="-Xms512M -Xmx2048M"' > $path
+                  echo 'JAVA_OPTS="$JAVA_OPTS -Xlog:gc*:file=/var/lib/tomcat/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=50m"' >> $path
+                fi
+                chmod +x $path
+                sudo cd /var/lib/tomcat/bin/ && setenv.sh
+                sudo systemctl restart tomcat
+        configure_mfa:
+          files:            
+            /var/lib/tomcat/webapps/asm_portal/WEB-INF/classes/apersona-db.properties:
+              content: !Sub |
+                # DB properties for apersona database
+                #MySql
+                db.driverClassName=com.mysql.jdbc.Driver
+                db.url=jdbc:mysql://${route53RDSMFA}:3306/apersona
+                db.username=root
+                db.password=${DBPassword}
+                db.jpa.database=MYSQL
+                #########################################################################################################
+                # Please don't forget to run the asmdb-v${MFAVersion}-Install.sql script on the RDS/db instance and update db.url
+              mode: "000644"
+              owner: tomcat
+              group: tomcat            
+            /var/lib/tomcat/webapps/asm_portal/WEB-INF/classes/apersona-twilio.properties:
+              content: !Sub
+                - |
+                  #############################################
+                  # Set ASM server instance for Twilio voice callback
+                  ##############################################
+                  TWILIO_CALLBACK_SERVICE=https://${prefix}asm-callback.${domain}/asm_callback/twilio.ap
+                  TWILIO_CALLBACK_SECRET_KEY=${secretkey}
+                - domain: !FindInMap
+                    - !Ref AWS::AccountId
+                    - all-regions
+                    - Domain
+                  prefix: !If
+                    - EnableHostnamePrefix
+                    - !Ref EnvId
+                    - ""
+                  secretkey: !Ref SecretKeyTwilio
+              mode: "000644"
+              owner: tomcat
+              group: tomcat   
+          commands:
+            01-change-file-permissions:
+              command: chmod 755 -R /var/lib/tomcat/webapps/asm_portal
+            02-change-file-ownership:
+              command: chown -R tomcat:tomcat /var/lib/tomcat/webapps/asm_portal
+            03-remove-index.jsp:
+              command: rm -f /var/lib/tomcat/webapps/ROOT/index.jsp && rm -rf /var/lib/tomcat/webapps/examples              
+        configure_cloudwatch:
+          files:
+            /opt/aws/asmportalmonitoringwithcloudwatch.sh:
+              content: !Sub |
+                #!/bin/bash
+                TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600") && curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id
+                INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+                http://169.254.169.254/latest/meta-data/instance-id)
+                ASGName=$(aws autoscaling describe-auto-scaling-instances --instance-ids $INSTANCE_ID --region ${AWS::Region} | grep "AutoScalingGroupName" | awk '{print $2}' | sed 's/[",]//g')
+                version='Version:${MFAVersion}'
+                cmd="`curl -s 'http://localhost:8080/asm_portal/about.ap' | grep -o $version`"
+                if [ $cmd == $version ]; then
+                  count=1
+                else
+                  count=0
+                fi
+                aws cloudwatch put-metric-data --namespace "System/Linux" --metric-name "ASMPortalStatus" --value $count --unit "Count" --dimensions AutoScalingGroupName=$ASGName --region ${AWS::Region}
+              mode: "000700"
+              owner: root
+              group: root
+          commands:
+            01-create_cron_job:
+              command: echo '* * * * * /bin/bash -c "/opt/aws/asmportalmonitoringwithcloudwatch.sh" >> crontaboutput.log 2>&1' | crontab -
+                
+        start_services:
+          commands:
+            00-daemon-reload:
+              command: sudo systemctl daemon-reload
+            01-start-tomcat-systemboot:
+              command: sudo systemctl enable tomcat.service
+            02-start-tomcat:
+              command: sudo systemctl start tomcat.service
+        finalise:
+          commands:
+            1-signal-success:
+              command: !Sub |
+                /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource autoscalinggroupASMPortal --region ${AWS::Region}
+    Properties:
+      LaunchTemplateName: !Sub smartvault-${EnvId}-ec2-launchtemplate-ASMPortal
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Sub smartvault-${EnvId}-iam-instanceprofile-mfa
+        ImageId: !Ref PortalImageId
+        Monitoring:
+          Enabled: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - InstanceMonitoring
+        InstanceType: !FindInMap          
+          - !Ref AWS::AccountId
+          - InstanceTypes
+          - PortalInstanceType  
+        KeyName: !FindInMap
+          - !Ref AWS::AccountId
+          - !Ref AWS::Region
+          - keypair
+        SecurityGroupIds:
+          - !Ref SmartVaultPortalSecurityGroupEC2
+        UserData: !Base64
+          Fn::Join:
+            - ""
+            - - |
+                #!/bin/bash -xe
+              - |
+                yum update -y aws-cfn-bootstrap
+              - "/opt/aws/bin/cfn-init -v "
+              - "         --stack "
+              - !Ref AWS::StackName
+              - "         --resource launchTemplateASMPortal "
+              - "         --configsets bootstrap "
+              - "         --region "
+              - !Ref AWS::Region
+              - ""
+
+  autoscalinggroupASMPortal:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      Cooldown: 300
+      DesiredCapacity: !Ref ASGdesired
+      HealthCheckGracePeriod: 300
+      HealthCheckType: EC2  
+      LaunchTemplate:
+        LaunchTemplateId: !Ref launchTemplateASMPortal
+        Version: !GetAtt launchTemplateASMPortal.LatestVersionNumber
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupInServiceInstances
+      MaxSize: !Ref ASGmax
+      MinSize: !Ref ASGmin
+      VPCZoneIdentifier:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp2
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-ec2-asg-ASMPortal
+          PropagateAtLaunch: "true"
+        - Key: Owner
+          Value: !Ref Owner
+          PropagateAtLaunch: "true"        
+      TargetGroupARNs:
+        - !Ref internalTargetGroupPortal
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: "true"
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref ASGdesired
+        Timeout: PT15M
+  mfaWeeklyScheduledActionUpPortal:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: ScheduleEnabled
+    Properties:
+      AutoScalingGroupName: !Ref autoscalinggroupASMPortal
+      DesiredCapacity: !Ref ASGdesired
+      MaxSize: !Ref ASGmax
+      MinSize: !Ref ASGmin
+      Recurrence: !Ref WeeklyScheduleUp
+  mfaWeekendScheduledActionDownPortal:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: ScheduleEnabled
+    Properties:
+      AutoScalingGroupName: !Ref autoscalinggroupASMPortal
+      DesiredCapacity: 0
+      MaxSize: 2
+      MinSize: 0
+      Recurrence: !Ref WeekendScheduleDown
+  mfaRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub smartvault-${EnvId}-rds-mfa
+      AllocatedStorage: "22"
+      DBInstanceClass: db.t3.medium
+      DBParameterGroupName: !Ref mfaDBParameterGroup
+      DBSubnetGroupName: !Ref mfaDBSubnetGroup
+      Engine: MySQL
+      EngineVersion: !Ref MySQLEngineVersion
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-secgrp-rds-mfa                
+      StorageType: !Ref RdsStorageType
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-rds-mfa
+        - Key: Owner
+          Value: !Ref Owner
+  mfaDBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Parameter group for MFA (aPersona) Server - support for case
+        insensitive table names and default collation of UTF8 can be added as
+        needed
+      Family: mysql5.7
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-paramgrp-rds-mfa
+        - Key: Owner
+          Value: !Ref Owner
+  mfaDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: MFA DB Subnet Group
+      DBSubnetGroupName: !Sub smartvault-${EnvId}-subnetgrp-rds-mfa
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privatedata1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privatedata2
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-subnetgrp-rds-mfa
+        - Key: Owner
+          Value: !Ref Owner
+   
+  AddIngressRuleForRDSWebApps:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue 
+          Fn::Sub: smartvault-${EnvId}-secgrp-rds-mfa  
+      IpProtocol: tcp
+      FromPort: 3306  
+      ToPort: 3306    
+      SourceSecurityGroupId: !Ref SmartVaultWebappsSecurityGroupEC2
+      Description: "Allow ASMWebapps MFA access"
+
+  AddIngressRuleForRDSPortal:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue 
+          Fn::Sub: smartvault-${EnvId}-secgrp-rds-mfa  
+      IpProtocol: tcp
+      FromPort: 3306  
+      ToPort: 3306    
+      SourceSecurityGroupId: !Ref SmartVaultPortalSecurityGroupEC2
+      Description: "Allow ASMPortal access"
+
+  CloudWatchEC2CpuUtilization:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMPortal
+    Properties:
+      ActionsEnabled: true
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMPortal-HighCPU"
+      AlarmDescription: !Sub "High CPU usage alarm for ASMPortal in ${EnvId}"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref autoscalinggroupASMPortal
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: "60"
+      EvaluationPeriods: "5"
+      Period: "60"
+      Statistic: Average
+      
+  route53RDSMFA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      ResourceRecords:
+        - !GetAtt mfaRDSInstance.Endpoint.Address
+      HostedZoneId: !ImportValue smartvault-route53-zoneid-internal
+      Name: !Sub
+        - ${prefix}mfadb.int.${domain}
+        - domain: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - Domain
+          prefix: !If
+            - EnableHostnamePrefix
+            - !Ref EnvId
+            - ""
+      Type: CNAME
+      TTL: "900"
+      
+  CloudWatchEC2DiskUtilization:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMPortal
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMPortal-LowFreeSpace"
+      AlarmDescription: !Sub "Low disk space alarm for ASMPortal in ${EnvId}"
+      Metrics:
+        - Label: DiskFree(/)-B
+          MetricStat:
+            Metric:
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref autoscalinggroupASMPortal
+              MetricName: DiskFree - /
+              Namespace: System/Linux
+            Period: 60
+            Stat: Average
+            Unit: Bytes
+          Id: m1
+          ReturnData: false
+        - Label: DiskFree(/)-MB
+          Expression: m1/(1000^2)
+          Id: e1
+          ReturnData: true
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: "1000"
+      EvaluationPeriods: "5"
+
+  CloudWatchEC2MemUtilization:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMPortal
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMPortal-LowAvailableMemory"
+      AlarmDescription: !Sub "Low available memory alarm for ASMPortal in ${EnvId}"
+      Metrics:
+        - Label: MemAvailable-B
+          MetricStat:
+            Metric:
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref autoscalinggroupASMPortal
+              MetricName: MemAvailable
+              Namespace: System/Linux
+            Period: 60
+            Stat: Average
+            Unit: Bytes
+          Id: m1
+          ReturnData: false
+        - Label: MemAvailable-MB
+          Expression: m1/(1000^2)
+          Id: e1
+          ReturnData: true
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: "512"
+      EvaluationPeriods: "5"     
+             
+  CloudWatchASMPortalStatus:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMPortal
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "${autoscalinggroupASMPortal}: ASM Portal Status"
+      AlarmDescription: !Sub "${autoscalinggroupASMPortal}: ASM Portal Status"
+      MetricName: ASMPortalStatus
+      Namespace: System/Linux
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref autoscalinggroupASMPortal
+      ComparisonOperator: LessThanThreshold
+      Threshold: "1"
+      EvaluationPeriods: "5"
+      Period: "60"
+      Statistic: Average
+  
+  CloudWatchEC2CpuUtilizationASMWebApps:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMWebApps
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMWebApps-HighCPU"
+      AlarmDescription: !Sub "High CPU usage alarm for ASMWebApps in ${EnvId}"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref autoscalinggroupASMWebApps
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: "60"
+      EvaluationPeriods: "5"
+      Period: "60"
+      Statistic: Average
+
+  CloudWatchEC2MemUtilizationPercentageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: 
+      - autoscalinggroupASMWebApps
+      - MemoryTargetTrackingScalingPolicy
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMWebApps-Memutilizationpercent"
+      AlarmDescription: !Sub "Memory utilization percentage alarm for ASMWebApps in ${EnvId}"
+      MetricName: MemoryUtilization
+      Namespace: System/Linux
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref autoscalinggroupASMWebApps
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 80.0
+      ComparisonOperator: GreaterThanThreshold
+      
+  CloudWatchEC2DiskUtilizationASMWebApps:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMWebApps
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMWebApps-LowFreeSpace"
+      AlarmDescription: !Sub "Low disk space alarm for ASMWebApps in ${EnvId}"
+      Metrics:
+        - Label: DiskFree(/)-B
+          MetricStat:
+            Metric:
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref autoscalinggroupASMWebApps
+              MetricName: DiskFree - /
+              Namespace: System/Linux
+            Period: 60
+            Stat: Average
+            Unit: Bytes
+          Id: m1
+          ReturnData: false
+        - Label: DiskFree(/)-MB
+          Expression: m1/(1000^2)
+          Id: e1
+          ReturnData: true
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: "1000"
+      EvaluationPeriods: "5"
+      
+  CloudWatchEC2MemUtilizationASMWebApps:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMWebApps
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMWebApps-LowAvailableMemory"
+      AlarmDescription: !Sub "Low available memory alarm for ASMWebApps in ${EnvId}"
+      Metrics:
+        - Label: MemAvailable-B
+          MetricStat:
+            Metric:
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref autoscalinggroupASMWebApps
+              MetricName: MemAvailable
+              Namespace: System/Linux
+            Period: 60
+            Stat: Average
+            Unit: Bytes
+          Id: m1
+          ReturnData: false
+        - Label: MemAvailable-MB
+          Expression: m1/(1000^2)
+          Id: e1
+          ReturnData: true
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: "512"
+      EvaluationPeriods: "5"
+                  
+  CloudWatchEC2CpuUtilizationASMCallback:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMCallback
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMCallback-HighCPU"
+      AlarmDescription: !Sub "High CPU usage alarm for ASMCallback in ${EnvId}"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref autoscalinggroupASMCallback
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: "60"
+      EvaluationPeriods: "5"
+      Period: "60"
+      Statistic: Average
+
+  CloudWatchEC2DiskUtilizationASMCallback:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMCallback
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMCallback-LowFreeSpace"
+      AlarmDescription: !Sub "Low disk space alarm for ASMCallback in ${EnvId}"
+      Metrics:
+        - Label: DiskFree(/)-B
+          MetricStat:
+            Metric:
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref autoscalinggroupASMCallback
+              MetricName: DiskFree - /
+              Namespace: System/Linux
+            Period: 60
+            Stat: Average
+            Unit: Bytes
+          Id: m1
+          ReturnData: false
+        - Label: DiskFree(/)-MB
+          Expression: m1/(1000^2)
+          Id: e1
+          ReturnData: true
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: "1000"
+      EvaluationPeriods: "5"
+
+  CloudWatchEC2MemUtilizationASMCallback:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: autoscalinggroupASMCallback
+    Properties:
+      ActionsEnabled: !Ref ActionsEnabled
+      InsufficientDataActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      OKActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: smartvault-${EnvId}-sns-topic-alerts
+      AlarmName: !Sub "smartvault-${EnvId}-ASMCallback-LowAvailableMemory"
+      AlarmDescription: !Sub "Low available memory alarm for ASMCallback in ${EnvId}"
+      Metrics:
+        - Label: MemAvailable-B
+          MetricStat:
+            Metric:
+              Dimensions:
+                - Name: AutoScalingGroupName
+                  Value: !Ref autoscalinggroupASMCallback
+              MetricName: MemAvailable
+              Namespace: System/Linux
+            Period: 60
+            Stat: Average
+            Unit: Bytes
+          Id: m1
+          ReturnData: false
+        - Label: MemAvailable-MB
+          Expression: m1/(1000^2)
+          Id: e1
+          ReturnData: true
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: "512"
+      EvaluationPeriods: "5"
+      
+  internalAlbWebApps:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Sub smartvault-s3-logging-${AWS::AccountId}
+      Name: !Sub smartvault-${EnvId}-intalb-webapp-mfa
+      Scheme: internal
+      SecurityGroups:
+        - !Ref SmartVaultWebappsSecurityGroup          
+      Subnets:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp2
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-intalb-webapp-mfa
+        - Key: Owner
+          Value: !Ref Owner
+    
+  internalTargetGroupWebApps:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health/index.html
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      Name: !Sub smartvault-${EnvId}-tgt-webapps-mfa
+      Port: "8080"
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "300"
+      UnhealthyThresholdCount: 2
+      VpcId: !ImportValue
+        Fn::Sub: smartvault-${AWS::Region}-vpc
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-tgt-webapps-mfa
+        - Key: Owner
+          Value: !Ref Owner
+
+  internalListenerWebApps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref internalTargetGroupWebApps
+      LoadBalancerArn: !Ref internalAlbWebApps
+      Port: "8080"
+      Protocol: HTTP
+
+  internalListenerRuleWebApps:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref internalTargetGroupWebApps
+          Type: forward
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Sub
+              - ${prefix}asm.int.${domain}
+              - domain: !FindInMap
+                  - !Ref AWS::AccountId
+                  - all-regions
+                  - Domain
+                prefix: !If
+                  - EnableHostnamePrefix
+                  - !Ref EnvId
+                  - ""
+      ListenerArn: !Ref internalListenerWebApps
+      Priority: 100 
+      
+  internalAlbPortal:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Sub smartvault-s3-logging-${AWS::AccountId}
+      Name: !Sub smartvault-${EnvId}-intalb-portal-mfa
+      Scheme: internal
+      SecurityGroups:
+        - !Ref SmartVaultPortalSecurityGroup       
+      Subnets:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-privateapp2
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-intalb-portal-mfa
+        - Key: Owner
+          Value: !Ref Owner     
+
+  internalTargetGroupPortal:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /asm_portal/login.ap
+      HealthCheckPort: 8080  
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      Name: !Sub smartvault-${EnvId}-tgt-portal-mfa
+      Port: "8080"  
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "300"
+      UnhealthyThresholdCount: 2
+      VpcId: !ImportValue
+        Fn::Sub: smartvault-${AWS::Region}-vpc
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-tgt-portal-mfa
+        - Key: Owner
+          Value: !Ref Owner
+          
+  internalListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+      LoadBalancerArn: !Ref internalAlbPortal
+      Port: "80"  
+      Protocol: HTTP
+
+  internalListenerPortal:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref internalTargetGroupPortal
+      LoadBalancerArn: !Ref internalAlbPortal
+      Port: "443" 
+      Protocol: HTTPS  
+      SslPolicy: !Ref SslPolicy
+      Certificates:
+        - CertificateArn: !FindInMap [ !Ref "AWS::AccountId", "all-regions", "CertificateArn" ]
+
+  internalListenerRulePortal:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref internalTargetGroupPortal
+          Type: forward
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Sub
+                - ${prefix}mfa.int.${domain}
+                - domain: !FindInMap
+                    - !Ref AWS::AccountId
+                    - all-regions
+                    - Domain
+                  prefix: !If
+                    - EnableHostnamePrefix
+                    - !Ref EnvId
+                    - ""
+      ListenerArn: !Ref internalListenerPortal
+      Priority: 100
+
+  publicAlbCallback:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub smartvault-${EnvId}-alb-callback-mfa
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SmartVaultCallbackSecurityGroup    
+      Subnets:
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-public1
+        - !ImportValue
+          Fn::Sub: smartvault-${AWS::Region}-subnet-public2
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Sub smartvault-s3-logging-${AWS::AccountId}
+      Tags:
+        - Key: Name
+          Value: !Sub smartvault-${EnvId}-alb-callback-mfa
+        - Key: Owner
+          Value: !Ref Owner
+  
+  publicTargetGroupCallback:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health/index.html 
+      HealthCheckPort: 8080
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      Name: !Sub smartvault-${EnvId}-tgt-callback-mfa
+      Port: "8080"
+      Protocol: HTTP
+      VpcId: !ImportValue
+        Fn::Sub: smartvault-${AWS::Region}-vpc
+
+  publicListenerCallback:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+      LoadBalancerArn: !Ref publicAlbCallback
+      Port: "80"
+      Protocol: HTTP 
+      
+  publicListenerRuleCallback:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref publicTargetGroupCallback
+          Type: forward
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Sub "asm-callback.${EnvId}.smartvault.com"
+      ListenerArn: !Ref publicListenerCallbackHttps
+      Priority: 100
+
+  publicListenerCallbackHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref publicTargetGroupCallback
+      LoadBalancerArn: !Ref publicAlbCallback
+      Port: "443"
+      Protocol: HTTPS          
+      SslPolicy: !Ref SslPolicy
+      Certificates:
+        - CertificateArn: !ImportValue smartvault-acm-wildcard
+     
+  route53Callback:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt publicAlbCallback.DNSName
+        EvaluateTargetHealth: false
+        HostedZoneId: !GetAtt publicAlbCallback.CanonicalHostedZoneID
+      HostedZoneId: !ImportValue smartvault-route53-zoneid-public
+      Name: !Sub
+        - ${prefix}asm-callback.${domain}
+        - domain: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - Domain
+          prefix: !If
+            - EnableHostnamePrefix
+            - !Ref EnvId
+            - ""
+      Type: A
+
+  route53MFA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt internalAlbWebApps.DNSName
+        EvaluateTargetHealth: false
+        HostedZoneId: !GetAtt internalAlbWebApps.CanonicalHostedZoneID
+      HostedZoneId: !ImportValue smartvault-route53-zoneid-internal
+      Name: !Sub
+        - ${prefix}asm.int.${domain}
+        - domain: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - Domain
+          prefix: !If
+            - EnableHostnamePrefix
+            - !Ref EnvId
+            - ""
+      Type: A
+     
+  route53Portal:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt internalAlbPortal.DNSName
+        EvaluateTargetHealth: false
+        HostedZoneId: !GetAtt internalAlbPortal.CanonicalHostedZoneID
+      HostedZoneId: !ImportValue smartvault-route53-zoneid-internal
+      Name: !Sub
+        - ${prefix}mfa.int.${domain}
+        - domain: !FindInMap
+            - !Ref AWS::AccountId
+            - all-regions
+            - Domain
+          prefix: !If
+            - EnableHostnamePrefix
+            - !Ref EnvId
+            - ""
+      Type: A
+      
+Outputs:
+  autoscalinggroupASMWebApps:
+    Value: !Ref autoscalinggroupASMWebApps
+    Export:
+      Name: !Sub smartvault-${EnvId}-ec2-asg-ASMWebApps
+      
+  autoscalinggroupASMPortal:
+    Value: !Ref autoscalinggroupASMPortal
+    Export:
+      Name: !Sub smartvault-${EnvId}-ec2-asg-ASMPortal
+  
+  autoscalinggroupASMCallback:
+    Value: !Ref autoscalinggroupASMCallback
+    Export:
+      Name: !Sub smartvault-${EnvId}-ec2-asg-ASMCallback
