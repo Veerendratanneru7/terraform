@@ -109,7 +109,7 @@ data "aws_sns_topic" "alerts" {
 
 data "aws_route53_zone" "internal" {
   name         = "int.${local.domain}"
-  private_zone = true
+  private_zone = false
 }
 
 data "aws_route53_zone" "public" {
