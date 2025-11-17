@@ -648,7 +648,7 @@ module "asg_portal" {
   enable_monitoring    = local.instance_monitoring
 
   # User data configuration
-  user_data_template_file = "${path.module}/org-module-fixes/asg/user-data/portal.sh.tpl"
+  user_data_template_file = "${path.module}/user-data/portal.sh.tpl"
   user_data_template_vars = {
     env_id            = local.env_id
     mfa_version       = var.mfa_version
@@ -719,7 +719,7 @@ module "asg_webapps" {
   enable_monitoring     = local.instance_monitoring
 
   # User data configuration
-  user_data_template_file = "${path.module}/org-module-fixes/asg/user-data/webapps.sh.tpl"
+  user_data_template_file = "${path.module}/user-data/webapps.sh.tpl"
   user_data_template_vars = {
     env_id            = local.env_id
     mfa_version       = var.mfa_version
@@ -808,7 +808,7 @@ module "asg_callback" {
   enable_monitoring    = local.instance_monitoring
 
   # User data configuration
-  user_data_template_file = "${path.module}/org-module-fixes/asg/user-data/callback.sh.tpl"
+  user_data_template_file = "${path.module}/user-data/callback.sh.tpl"
   user_data_template_vars = {
     secret_key_twilio = var.secret_key_twilio
     jvm_xms           = local.jvm_heap_config.xms
