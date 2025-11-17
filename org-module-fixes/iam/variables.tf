@@ -18,3 +18,4 @@ variable "restricted_users" {
 variable "log_group_arns" {
   type = list(string)
 }
+

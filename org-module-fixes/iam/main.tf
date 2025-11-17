@@ -123,3 +123,4 @@ resource "aws_iam_group_policy" "log_group_access_deny" {
   group  = "smartvault-iam-group-devops"
   policy = data.aws_iam_policy_document.log_group_access_deny[0].json
 }
+
