@@ -43,3 +43,27 @@ output "deployment_color" {
   value       = var.deployment_color
   description = "Current deployment color"
 }
+
+# ==============================================================================
+# IAM OUTPUTS
+# ==============================================================================
+
+output "iam_role_arn" {
+  value       = aws_iam_role.mfa.arn
+  description = "IAM role ARN for MFA instances"
+}
+
+output "iam_role_name" {
+  value       = aws_iam_role.mfa.name
+  description = "IAM role name for MFA instances"
+}
+
+output "iam_instance_profile_name" {
+  value       = aws_iam_instance_profile.mfa.name
+  description = "IAM instance profile name for MFA instances"
+}
+
+output "iam_instance_profile_arn" {
+  value       = aws_iam_instance_profile.mfa.arn
+  description = "IAM instance profile ARN for MFA instances"
+}

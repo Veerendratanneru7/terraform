@@ -48,24 +48,6 @@ module "cloudwatch_log_callback" {
 }
 
 # ==============================================================================
-# IAM - Using org-module-fixes (No org module available)
-# ==============================================================================
-
-module "iam" {
-  source = "./org-module-fixes/iam"
-
-  env_id           = local.env_id
-  account_id       = local.account_id
-  is_production    = local.is_production
-  restricted_users = var.restricted_users
-  log_group_arns = [
-    module.cloudwatch_log_portal.log_group_arn,
-    module.cloudwatch_log_webapps.log_group_arn,
-    module.cloudwatch_log_callback.log_group_arn
-  ]
-}
-
-# ==============================================================================
 # SECURITY GROUPS - Using Org Modules
 # ==============================================================================
 
@@ -638,7 +620,7 @@ module "asg_portal" {
   ami_id               = var.portal_ami_id
   instance_type        = local.portal_instance_type
   key_name             = local.keypair
-  iam_instance_profile = module.iam.instance_profile_name
+  iam_instance_profile = aws_iam_instance_profile.mfa.name
   security_groups      = [module.sg_portal_ec2.security_group_id]
   subnet_ids           = [data.aws_subnet.private_app_1.id, data.aws_subnet.private_app_2.id]
   target_group_arns    = [module.tg_portal.arn]
@@ -709,7 +691,7 @@ module "asg_webapps" {
   ami_id                = var.webapps_ami_id
   instance_type         = local.webapps_instance_type
   key_name              = local.keypair
-  iam_instance_profile  = module.iam.instance_profile_name
+  iam_instance_profile  = aws_iam_instance_profile.mfa.name
   security_groups       = [module.sg_webapps_ec2.security_group_id]
   subnet_ids            = [data.aws_subnet.private_app_1.id, data.aws_subnet.private_app_2.id]
   target_group_arns     = [module.tg_webapps.arn]
@@ -798,7 +780,7 @@ module "asg_callback" {
   ami_id               = var.callback_ami_id
   instance_type        = local.callback_instance_type
   key_name             = local.keypair
-  iam_instance_profile = module.iam.instance_profile_name
+  iam_instance_profile = aws_iam_instance_profile.mfa.name
   security_groups      = [module.sg_callback_ec2.security_group_id]
   subnet_ids           = [data.aws_subnet.private_app_1.id, data.aws_subnet.private_app_2.id]
   target_group_arns    = [module.tg_callback.arn]
