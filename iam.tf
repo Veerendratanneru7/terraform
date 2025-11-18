@@ -75,8 +75,8 @@ data "aws_iam_policy_document" "log_group_access_deny" {
   count = local.is_production ? 1 : 0
 
   statement {
-    sid    = "DenyLogGroupAccess"
-    effect = "Deny"
+    sid     = "DenyLogGroupAccess"
+    effect  = "Deny"
     actions = ["logs:*"]
     resources = [
       module.cloudwatch_log_portal.log_group_arn,
